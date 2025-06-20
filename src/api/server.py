@@ -8,6 +8,7 @@ import asyncio
 import base64
 import io
 import logging
+import math
 import time
 import traceback
 import uuid
@@ -161,6 +162,58 @@ async def track_requests(request: Request, call_next):
 
 
 # Helper functions
+def logprob_to_confidence(avg_logprob: float) -> float:
+    """
+    Whisper의 avg_logprob을 신뢰도 점수(0.0-1.0)로 변환
+    
+    Args:
+        avg_logprob: Whisper 세그먼트의 평균 로그 확률
+        
+    Returns:
+        0.0-1.0 범위의 신뢰도 점수
+    """
+    if avg_logprob is None:
+        return 0.0
+    
+    # avg_logprob은 일반적으로 -inf ~ 0 범위
+    # -1.0 이상이면 높은 신뢰도, -3.0 이하면 낮은 신뢰도로 간주
+    if avg_logprob >= -0.5:
+        return 0.95
+    elif avg_logprob >= -1.0:
+        return 0.8 + (avg_logprob + 1.0) * 0.3  # -1.0~-0.5 -> 0.8~0.95
+    elif avg_logprob >= -2.0:
+        return 0.5 + (avg_logprob + 2.0) * 0.3  # -2.0~-1.0 -> 0.5~0.8
+    elif avg_logprob >= -3.0:
+        return 0.2 + (avg_logprob + 3.0) * 0.3  # -3.0~-2.0 -> 0.2~0.5
+    else:
+        return max(0.1, 0.2 + (avg_logprob + 3.0) * 0.1)  # -3.0 이하 -> 0.1~0.2
+
+
+def normalize_word_probability(probability: float) -> float:
+    """
+    Whisper 단어 확률을 정규화된 신뢰도로 변환
+    
+    Args:
+        probability: Whisper word probability (보통 0.0-1.0 범위)
+        
+    Returns:
+        정규화된 신뢰도 점수 (0.0-1.0)
+    """
+    if probability is None:
+        return 0.0
+    
+    # Whisper의 word probability는 이미 0-1 범위이지만,
+    # 실제로는 0.3-1.0 범위에서 더 의미있는 값들이 나옴
+    if probability >= 0.8:
+        return probability  # 높은 신뢰도는 그대로 유지
+    elif probability >= 0.5:
+        return 0.6 + (probability - 0.5) * 0.6  # 0.5-0.8 -> 0.6-0.8
+    elif probability >= 0.3:
+        return 0.3 + (probability - 0.3) * 1.5  # 0.3-0.5 -> 0.3-0.6
+    else:
+        return max(0.1, probability * 1.0)  # 0.3 이하 -> 최소 0.1
+
+
 def decode_audio_data(audio_data: str, audio_format: AudioFormat, sample_rate: int) -> np.ndarray:
     """Decode base64 audio data to numpy array"""
     try:
@@ -329,13 +382,9 @@ async def transcribe_utterance(request: TranscriptionRequest):
         }
         language = language_map.get(request.language, "ko")
         
-        # Map audio format
+        # Map audio format - only support PCM 16kHz
         format_map = {
-            AudioFormat.PCM_16KHZ: "pcm_16khz",
-            AudioFormat.WAV: "wav",
-            AudioFormat.MP3: "mp3",
-            AudioFormat.FLAC: "flac",
-            AudioFormat.M4A: "m4a"
+            AudioFormat.PCM_16KHZ: "pcm_16khz"
         }
         audio_format = format_map.get(request.audio_format, "pcm_16khz")
         
@@ -374,10 +423,15 @@ async def transcribe_utterance(request: TranscriptionRequest):
                         word=word.get('word', ''),
                         start=word.get('start', 0.0),
                         end=word.get('end', 0.0),
-                        confidence=word.get('probability') if request.enable_confidence else None
+                        confidence=normalize_word_probability(word.get('probability')) if request.enable_confidence else None
                     )
                     for word in segment['words']
                 ]
+            
+            # 세그먼트 신뢰도 계산: avg_logprob을 신뢰도로 변환
+            segment_confidence = None
+            if request.enable_confidence:
+                segment_confidence = logprob_to_confidence(segment.get('avg_logprob'))
             
             response_segments.append(
                 TranscriptionSegment(
@@ -385,7 +439,7 @@ async def transcribe_utterance(request: TranscriptionRequest):
                     text=segment['text'].strip(),
                     start=segment.get('start', 0.0),
                     end=segment.get('end', result.audio_duration),
-                    confidence=segment.get('avg_logprob') if request.enable_confidence else None,
+                    confidence=segment_confidence,
                     words=words
                 )
             )
@@ -502,15 +556,18 @@ async def infer_batch(request: BatchTranscriptionRequest):
                             word=word_dict['word'],
                             start=word_dict['start'],
                             end=word_dict['end'],
-                            confidence=word_dict.get('confidence', 0.0)
+                            confidence=normalize_word_probability(word_dict.get('probability', 0.0))
                         ))
+                
+                # 배치 처리에서도 신뢰도 계산 적용
+                segment_confidence = logprob_to_confidence(segment_dict.get('avg_logprob', -5.0))
                 
                 segments.append(TranscriptionSegment(
                     id=i,
                     text=segment_dict['text'],
                     start=segment_dict['start'],
                     end=segment_dict['end'],
-                    confidence=segment_dict.get('confidence', 0.0),
+                    confidence=segment_confidence,
                     words=words if words else None
                 ))
             

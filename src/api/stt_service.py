@@ -209,6 +209,9 @@ class FasterWhisperSTTService:
         self.gpu_optimizations_applied = False
         self.rtx_4090_optimizations_applied = False
         
+        # 설정 캐시
+        self.config_cache: Dict[str, Dict] = {}
+        
         logger.info(f"STT Service initialized with model={model_size}, device={device}, compute_type={compute_type}")
         logger.info("Korean language processor enabled with optimized settings")
         logger.info("Performance optimization and monitoring enabled")
@@ -725,32 +728,37 @@ class FasterWhisperSTTService:
         self.performance_optimizer.pre_inference_optimization()
         
         try:
-            # Use the audio decoding utility to handle file bytes
-            audio_array, sample_rate = decode_audio_data(audio_bytes, "auto")
+            # Use the audio decoding utility to handle file bytes (PCM 16kHz only)
+            loop = asyncio.get_event_loop()
+            audio_array = await loop.run_in_executor(
+                self.executor, decode_audio_data, audio_bytes, 'pcm_16khz'
+            )
             
-            # Resample to 16kHz if needed
-            if sample_rate != 16000:
-                import librosa
-                audio_array = librosa.resample(audio_array, orig_sr=sample_rate, target_sr=16000)
+            audio_duration = len(audio_array) / 16000.0
             
-            audio_duration = len(audio_array) / 16000
-            
-            # Set up VAD parameters with Korean optimization
-            if language == "ko":
-                # Use Korean-optimized VAD parameters with duration awareness
-                vad_parameters = self.korean_processor.get_korean_vad_parameters(audio_duration)
-                logger.debug(f"Using Korean-optimized VAD parameters for {audio_duration}s audio")
-            else:
-                # Default parameters for other languages
-                vad_parameters = {
-                    "threshold": 0.5,
-                    "min_speech_duration_ms": 250,
-                    "max_speech_duration_s": float('inf'),
-                    "min_silence_duration_ms": 2000,
-                    "speech_pad_ms": 400,
+            # RTX 4090 최적화 및 파라미터 가져오기 (캐싱 적용)
+            lang_key = language or "ko"
+            if lang_key not in self.config_cache:
+                logger.info(f"⚙️ Caching inference parameters for language: {lang_key}")
+                # 기본 파라미터 딕셔너리 구성
+                base_params = {
+                    'language': lang_key,
+                    'word_timestamps': word_timestamps,
+                    'beam_size': beam_size,
+                    'vad_filter': vad_filter
                 }
+                inference_params = get_rtx_4090_inference_params(base_params)
+                self.config_cache[lang_key] = inference_params
+            else:
+                inference_params = self.config_cache[lang_key].copy()
+                # word_timestamps 와 beam_size는 요청마다 다를 수 있으므로 업데이트
+                inference_params['word_timestamps'] = word_timestamps
+                inference_params['beam_size'] = beam_size
+                inference_params['vad_filter'] = vad_filter
+
+            start_time = time.time()
             
-            # Run transcription in executor
+            # 비동기 실행
             result = await asyncio.get_event_loop().run_in_executor(
                 self.executor,
                 self._transcribe_sync,
@@ -760,7 +768,7 @@ class FasterWhisperSTTService:
                 beam_size,
                 word_timestamps,
                 vad_filter,
-                vad_parameters
+                inference_params['vad_parameters']
             )
             
             processing_time = time.time() - start_time

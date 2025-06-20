@@ -12,12 +12,8 @@ import time
 
 
 class AudioFormat(str, Enum):
-    """Supported audio formats"""
+    """Supported audio formats - Only PCM 16kHz"""
     PCM_16KHZ = "pcm_16khz"
-    WAV = "wav"
-    MP3 = "mp3"
-    FLAC = "flac"
-    M4A = "m4a"
 
 
 class LanguageCode(str, Enum):
@@ -110,10 +106,9 @@ class TranscriptionRequest(BaseModel):
     
     @validator('sample_rate')
     def validate_sample_rate(cls, v, values):
-        """Validate sample rate compatibility"""
-        audio_format = values.get('audio_format')
-        if audio_format == AudioFormat.PCM_16KHZ and v != 16000:
-            raise ValueError("PCM_16KHZ format requires 16000 Hz sample rate")
+        """Validate sample rate - only 16kHz supported"""
+        if v != 16000:
+            raise ValueError("Only 16000 Hz sample rate is supported")
         return v
 
 
@@ -290,8 +285,8 @@ class BatchTranscriptionRequest(BaseModel):
     
     # Common settings
     audio_format: AudioFormat = Field(
-        default=AudioFormat.WAV,
-        description="Audio format for all files"
+        default=AudioFormat.PCM_16KHZ,
+        description="Audio format for all files (only PCM 16kHz supported)"
     )
     language: LanguageCode = Field(
         default=LanguageCode.KOREAN,
@@ -350,6 +345,136 @@ class ModelConfig(BaseModel):
     compute_type: str = Field(default="float16")
     beam_size: int = Field(default=1)
     language: str = Field(default="korean")
+
+
+class KeywordRegistrationRequest(BaseModel):
+    """키워드 등록 요청 모델"""
+    
+    call_id: str = Field(..., description="호출 ID")
+    keywords: List[Union[str, dict]] = Field(
+        ...,
+        description="키워드 목록 (문자열 또는 상세 정보 포함 딕셔너리)",
+        min_items=1,
+        max_items=100
+    )
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "call_id": "test_call_001",
+                "keywords": [
+                    "김화영",
+                    {
+                        "keyword": "카뮤",
+                        "aliases": ["카뮈", "까뮤"],
+                        "confidence_threshold": 0.8,
+                        "category": "person"
+                    }
+                ]
+            }
+        }
+
+
+class KeywordCorrectionRequest(BaseModel):
+    """키워드 교정 요청 모델"""
+    
+    call_id: str = Field(..., description="호출 ID")
+    text: str = Field(..., description="교정할 텍스트")
+    enable_fuzzy_matching: bool = Field(
+        default=True,
+        description="퍼지 매칭 활성화"
+    )
+    min_similarity: float = Field(
+        default=0.8,
+        description="최소 유사도 임계값 (0.0-1.0)",
+        ge=0.0,
+        le=1.0
+    )
+
+
+class KeywordCorrectionResponse(BaseModel):
+    """키워드 교정 응답 모델"""
+    
+    original_text: str = Field(..., description="원본 텍스트")
+    corrected_text: str = Field(..., description="교정된 텍스트")
+    corrections: List[dict] = Field(
+        default_factory=list,
+        description="교정 내역"
+    )
+    keywords_detected: List[str] = Field(
+        default_factory=list,
+        description="감지된 키워드 목록"
+    )
+    confidence_score: float = Field(..., description="교정 신뢰도 점수")
+    processing_time: float = Field(..., description="처리 시간 (초)")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "original_text": "김와영 씨가 까뮤의 전집을 번역했습니다",
+                "corrected_text": "김화영 씨가 카뮤의 전집을 번역했습니다",
+                "corrections": [
+                    {
+                        "type": "fuzzy_match",
+                        "original": "김와영",
+                        "corrected": "김화영",
+                        "confidence": 0.85,
+                        "method": "fuzzy_replacement"
+                    },
+                    {
+                        "type": "alias_match", 
+                        "original": "까뮤",
+                        "corrected": "카뮤",
+                        "confidence": 0.95,
+                        "method": "alias_replacement"
+                    }
+                ],
+                "keywords_detected": ["김화영", "카뮤", "전집", "번역"],
+                "confidence_score": 0.89,
+                "processing_time": 0.023
+            }
+        }
+
+
+class TranscriptionWithCorrection(BaseModel):
+    """교정이 포함된 전사 응답 모델"""
+    
+    # 기본 전사 결과
+    text: str = Field(..., description="원본 전사 텍스트")
+    corrected_text: str = Field(..., description="교정된 전사 텍스트") 
+    language: str = Field(..., description="감지된 언어")
+    segments: List[TranscriptionSegment] = Field(
+        default_factory=list,
+        description="문장 단위 세그먼트"
+    )
+    
+    # 교정 정보
+    keyword_correction: KeywordCorrectionResponse = Field(
+        ...,
+        description="키워드 교정 결과"
+    )
+    
+    # 성능 메트릭스
+    metrics: ProcessingMetrics = Field(..., description="처리 성능 메트릭스")
+    
+    # 메타데이터
+    request_id: Optional[str] = Field(default=None)
+    session_id: Optional[str] = Field(default=None)
+    timestamp: float = Field(default_factory=time.time)
+
+
+class KeywordStatsResponse(BaseModel):
+    """키워드 통계 응답 모델"""
+    
+    total_keywords: int = Field(..., description="총 키워드 수")
+    total_corrections: int = Field(..., description="총 교정 횟수")
+    successful_corrections: int = Field(..., description="성공적인 교정 횟수")
+    success_rate: float = Field(..., description="교정 성공률")
+    avg_processing_time: float = Field(..., description="평균 처리 시간")
+    categories: dict = Field(
+        default_factory=dict,
+        description="카테고리별 통계"
+    )
 
 
 class ServerConfig(BaseModel):

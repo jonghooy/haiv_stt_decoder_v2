@@ -280,12 +280,12 @@ class AudioProcessor:
                           sample_rate: int = TARGET_SAMPLE_RATE,
                           normalize: bool = True) -> Tuple[np.ndarray, int, dict]:
         """
-        Process base64 audio data and return numpy array
+        Process base64 audio data - Only supports PCM 16kHz format
         
         Args:
-            audio_data: Base64 encoded audio data
-            audio_format: Expected audio format
-            sample_rate: Target sample rate
+            audio_data: Base64 encoded audio data (PCM 16-bit, 16kHz)
+            audio_format: Expected audio format (only 'pcm_16khz' supported)
+            sample_rate: Target sample rate (must be 16000)
             normalize: Whether to normalize audio
             
         Returns:
@@ -294,46 +294,30 @@ class AudioProcessor:
         processing_info = {
             'original_format': audio_format,
             'original_size': 0,
-            'detected_format': None,
-            'processing_method': None,
+            'detected_format': 'pcm_16khz',
+            'processing_method': 'pcm_direct',
             'resampled': False,
             'normalized': normalize,
             'duration': 0.0
         }
         
         try:
+            # Only support PCM 16kHz
+            if audio_format.lower() not in ['pcm_16khz', 'pcm']:
+                raise ValueError(f"지원하지 않는 오디오 포맷: {audio_format}. pcm_16khz만 지원됩니다.")
+            
+            if sample_rate != 16000:
+                raise ValueError(f"지원하지 않는 샘플레이트: {sample_rate}. 16000Hz만 지원됩니다.")
+            
             # Step 1: Validate and decode base64
-            logger.debug("Decoding base64 audio data...")
+            logger.debug("Decoding base64 PCM 16kHz audio data...")
             audio_bytes = self.validator.validate_base64(audio_data)
             processing_info['original_size'] = len(audio_bytes)
             
-            # Step 2: Validate sample rate
-            self.validator.validate_sample_rate(sample_rate)
-            
-            # Step 3: Detect actual format
-            detected_format = self.detector.detect_format(audio_bytes)
-            processing_info['detected_format'] = detected_format
-            
-            # Step 4: Process based on format
-            if audio_format.lower() == 'pcm_16khz':
-                # Raw PCM data
-                logger.debug("Processing raw PCM data...")
-                audio_array = self.converter.pcm_to_numpy(audio_bytes, sample_rate)
-                final_sr = sample_rate
-                processing_info['processing_method'] = 'pcm_direct'
-                
-            else:
-                # Encoded audio format - try multiple decoders
-                audio_array, orig_sr = self._decode_encoded_audio(audio_bytes, detected_format or audio_format)
-                processing_info['processing_method'] = f'decoded_{detected_format or audio_format}'
-                
-                # Resample if needed
-                if orig_sr != sample_rate:
-                    logger.debug(f"Resampling from {orig_sr}Hz to {sample_rate}Hz...")
-                    audio_array = self.converter.resample_audio(audio_array, orig_sr, sample_rate)
-                    processing_info['resampled'] = True
-                
-                final_sr = sample_rate
+            # Step 2: Process PCM data
+            logger.debug("Processing PCM 16kHz data...")
+            audio_array = self.converter.pcm_to_numpy(audio_bytes, sample_rate)
+            final_sr = sample_rate
             
             # Step 5: Ensure mono
             audio_array = self.converter.ensure_mono(audio_array)

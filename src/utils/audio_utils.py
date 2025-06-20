@@ -7,40 +7,103 @@ from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
+class AudioUtils:
+    """오디오 처리 유틸리티 클래스"""
+    
+    def __init__(self):
+        self.supported_pcm_formats = {
+            'pcm': 16000,
+            'pcm_16khz': 16000,
+            'pcm_8khz': 8000,
+            'pcm_44khz': 44100,
+            'pcm_48khz': 48000
+        }
+    
+    def process_pcm_audio(self, audio_data: bytes, audio_format: str) -> bytes:
+        """PCM 오디오 데이터 처리"""
+        try:
+            # PCM 포맷별 샘플레이트 확인
+            sample_rate = self.supported_pcm_formats.get(audio_format.lower(), 16000)
+            
+            # PCM 데이터를 int16 배열로 변환
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            
+            # 16kHz로 리샘플링 (Whisper가 16kHz를 선호함)
+            if sample_rate != 16000:
+                audio_array = self._resample_audio(audio_array, sample_rate, 16000)
+                logger.info(f"🔄 {sample_rate}Hz → 16kHz 리샘플링 완료")
+            
+            # float32로 정규화 [-1, 1]
+            audio_float = audio_array.astype(np.float32) / 32768.0
+            
+            # WAV 포맷으로 래핑하여 반환
+            return self._wrap_as_wav(audio_float, 16000)
+            
+        except Exception as e:
+            logger.error(f"❌ PCM 처리 실패 ({audio_format}): {e}")
+            raise ValueError(f"PCM 처리 실패: {e}")
+    
+    def _resample_audio(self, audio_array: np.ndarray, from_sr: int, to_sr: int) -> np.ndarray:
+        """오디오 리샘플링"""
+        if from_sr == to_sr:
+            return audio_array
+        
+        # 간단한 선형 보간 리샘플링
+        duration = len(audio_array) / from_sr
+        new_length = int(duration * to_sr)
+        
+        # 선형 보간
+        old_indices = np.linspace(0, len(audio_array) - 1, new_length)
+        resampled = np.interp(old_indices, np.arange(len(audio_array)), audio_array)
+        
+        return resampled.astype(np.int16)
+    
+    def _wrap_as_wav(self, audio_float: np.ndarray, sample_rate: int) -> bytes:
+        """float32 오디오를 WAV 바이트로 래핑"""
+        try:
+            # float32를 int16으로 변환
+            audio_int16 = (audio_float * 32767).astype(np.int16)
+            
+            # WAV 포맷으로 래핑
+            with io.BytesIO() as wav_buffer:
+                with wave.open(wav_buffer, 'wb') as wav_file:
+                    wav_file.setnchannels(1)  # 모노
+                    wav_file.setsampwidth(2)  # 16-bit
+                    wav_file.setframerate(sample_rate)
+                    wav_file.writeframes(audio_int16.tobytes())
+                
+                return wav_buffer.getvalue()
+                
+        except Exception as e:
+            logger.error(f"❌ WAV 래핑 실패: {e}")
+            raise
+
 def decode_audio_data(audio_data: bytes, audio_format: str = 'pcm_16khz') -> Tuple[np.ndarray, int]:
     """
-    Decode audio data from various formats to numpy array.
+    Decode audio data - Only supports PCM 16kHz format.
     
     Args:
-        audio_data: Raw audio bytes
-        audio_format: Format of audio data ('pcm_16khz', 'wav', 'mp3', etc.)
+        audio_data: Raw audio bytes (PCM 16-bit, 16kHz)
+        audio_format: Format of audio data (only 'pcm_16khz' supported)
     
     Returns:
         Tuple of (audio_array, sample_rate)
     """
     try:
         if audio_format.lower() in ['pcm_16khz', 'pcm']:
-            # Handle raw PCM data
+            # Handle raw PCM data (16kHz, 16-bit only)
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
             # Convert to float32 in range [-1, 1]
             audio_array = audio_array.astype(np.float32) / 32768.0
-            return audio_array, 16000
-            
-        elif audio_format.lower() == 'wav':
-            # Handle WAV format
-            return _decode_wav(audio_data)
-            
-        elif audio_format.lower() in ['mp3', 'flac', 'm4a']:
-            # Handle compressed formats
-            return _decode_compressed_audio(audio_data, audio_format)
-            
+            sample_rate = 16000  # 고정 16kHz
+            logger.info(f"📻 PCM 16kHz 오디오 처리: {len(audio_array)} samples, {sample_rate}Hz")
+            return audio_array, sample_rate
         else:
-            logger.warning(f"Unknown audio format: {audio_format}, trying automatic detection")
-            return _decode_audio_automatic(audio_data)
+            raise ValueError(f"지원하지 않는 오디오 포맷: {audio_format}. pcm_16khz만 지원됩니다.")
             
     except Exception as e:
-        logger.error(f"Failed to decode audio with format {audio_format}: {e}")
-        raise ValueError(f"Audio processing failed: {e}")
+        logger.error(f"PCM 16kHz 오디오 처리 실패: {e}")
+        raise ValueError(f"PCM 16kHz 오디오 처리 실패: {e}")
 
 def _decode_wav(audio_data: bytes) -> Tuple[np.ndarray, int]:
     """Decode WAV format audio data."""
@@ -52,6 +115,8 @@ def _decode_wav(audio_data: bytes) -> Tuple[np.ndarray, int]:
                 sample_rate = wav_file.getframerate()
                 channels = wav_file.getnchannels()
                 sampwidth = wav_file.getsampwidth()
+                
+                logger.info(f"📻 WAV 오디오 감지: {sample_rate}Hz, {channels}ch, {sampwidth*8}bit")
                 
                 # Convert to numpy array
                 if sampwidth == 1:
@@ -73,6 +138,7 @@ def _decode_wav(audio_data: bytes) -> Tuple[np.ndarray, int]:
                 if channels > 1:
                     audio_array = audio_array.reshape(-1, channels)
                     audio_array = np.mean(audio_array, axis=1)
+                    logger.info("🔄 스테레오 → 모노 변환 완료")
                 
                 return audio_array, sample_rate
                 
