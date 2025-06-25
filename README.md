@@ -143,7 +143,68 @@ curl -X POST http://localhost:8004/infer/utterance \
 - **GET** `/queue/result/{request_id}` - 처리 결과 조회
 - **GET** `/queue/status/{request_id}` - 요청 상태 조회
 
+### 6. 🗂️ 배치 처리 시스템 (NEW!)
+- **POST** `/batch/transcribe` - 다중 파일 배치 처리 제출 (최대 50개 파일)
+- **GET** `/batch/status/{batch_id}` - 배치 처리 상태 및 진행률 조회
+- **GET** `/batch/result/{batch_id}` - 배치 처리 결과 조회
+- **GET** `/batch/download/{batch_id}` - 결과 ZIP 파일 다운로드
+- **DELETE** `/batch/cancel/{batch_id}` - 배치 처리 취소
+- **GET** `/batch/list` - 모든 배치 작업 목록 조회
+- **POST** `/batch/cleanup` - 오래된 배치 작업 정리
+
+### 7. 🔄 실시간 진행 모니터링
+- **GET** `/batch/progress/{batch_id}` - Server-Sent Events를 통한 실시간 진행률 스트림
+- **WebSocket** `/batch/progress/{batch_id}` - WebSocket을 통한 실시간 진행률 업데이트
+
 ## 📝 API 사용법 및 응답 형식
+
+### 📦 배치 처리 `/batch/transcribe` ⭐ (NEW!)
+
+#### 요청 형식 (Multipart Form-Data):
+```bash
+curl -X POST http://localhost:8004/batch/transcribe \
+  -F "language=ko" \
+  -F "enable_word_timestamps=true" \
+  -F "enable_confidence=true" \
+  -F "enable_keyword_boosting=true" \
+  -F "call_id=test_call_001" \
+  -F "keyword_boost_factor=2.0" \
+  -F "files=@test_korean_sample1.wav" \
+  -F "files=@test_korean_sample2.wav"
+```
+
+#### 응답 형식 (⚡ 즉시 반환):
+```json
+{
+  "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "processing", 
+  "message": "배치 처리가 시작되었습니다. 2개 파일 처리 중",
+  "total_files": 2,
+  "processed_files": 0,
+  "failed_files": 0,
+  "created_at": "2024-12-26T10:30:00",
+  "progress_url": "/batch/progress/550e8400-e29b-41d4-a716-446655440000",
+  "status_url": "/batch/status/550e8400-e29b-41d4-a716-446655440000",
+  "result_url": "/batch/result/550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**⚡ 중요**: 배치 요청은 **즉시 200 응답**을 반환합니다. 실제 처리는 백그라운드에서 비동기적으로 진행되며, `progress_url`과 `status_url`을 통해 실시간 진행 상황을 추적할 수 있습니다.
+
+#### 진행 상황 추적:
+```bash
+# 1. 실시간 진행률 (Server-Sent Events)
+curl http://localhost:8004/batch/progress/{batch_id}
+
+# 2. 상태 조회 (일반 HTTP)
+curl http://localhost:8004/batch/status/{batch_id}
+
+# 3. 완료된 결과 조회
+curl http://localhost:8004/batch/result/{batch_id}
+
+# 4. 결과 ZIP 파일 다운로드
+curl -O http://localhost:8004/batch/download/{batch_id}
+```
 
 ### 🎯 신뢰도 분석 전사 `/infer/utterance` (권장)
 
@@ -220,7 +281,7 @@ curl -X POST http://localhost:8004/infer/utterance \
 ### 🎯 핵심 특징 (실제 검증됨)
 - **🧠 지능형 교정**: 단순 치환이 아닌 NLP 기반 다층 교정 파이프라인
 - **⚡ 초고속 처리**: 평균 0.8ms (처리량: 1,184 요청/초)
-- **🎯 완벽한 정확도**: 교정 성공률 100%, 신뢰도 0.75~0.95
+- **�� 완벽한 정확도**: 교정 성공률 100%, 신뢰도 0.75~0.95
 - **🔄 실시간 통합**: STT (385ms) + 키워드교정 (2ms) = 387ms
 - **🌐 다국어/혼재**: 한국어, 영어, 약어, 별칭 동시 지원
 
@@ -388,6 +449,192 @@ async def setup_comprehensive_keywords():
         else:
             print(f"❌ 키워드 등록 실패: {response.status}")
             return None
+
+## 🗂️ 배치 처리 시스템 (NEW!)
+
+### 🎯 핵심 특징
+- **다중 파일 처리**: 최대 50개 파일 동시 처리
+- **지원 포맷**: WAV, MP3, FLAC, M4A, OGG, WebM
+- **자동 결과 패키지**: JSON + 개별 텍스트 파일 ZIP 생성
+- **실시간 진행률**: 처리 상태 및 진행률 모니터링
+- **백그라운드 처리**: 비동기 처리로 다른 작업 병행 가능
+
+### 📊 배치 처리 성능
+- **처리 속도**: 파일당 평균 0.15~0.89초 (길이에 따라)
+- **동시 처리**: 최대 2개 배치 작업 병렬 실행
+- **메모리 효율**: 파일별 개별 처리로 메모리 최적화
+- **자동 정리**: 24시간 후 임시 파일 자동 삭제
+
+### 🚀 배치 처리 사용법
+
+#### 1. 배치 제출 (Python 예제)
+```python
+import requests
+
+def submit_batch_transcription():
+    url = "http://localhost:8004/batch/transcribe"
+    
+    # 여러 오디오 파일 준비
+    files = [
+        ('files', ('audio1.wav', open('audio1.wav', 'rb'), 'audio/wav')),
+        ('files', ('audio2.mp3', open('audio2.mp3', 'rb'), 'audio/mp3')),
+        ('files', ('audio3.flac', open('audio3.flac', 'rb'), 'audio/flac'))
+    ]
+    
+    data = {
+        'language': 'ko',
+        'vad_filter': False,
+        'enable_word_timestamps': True,
+        'enable_confidence': True,
+        'priority': 'medium'
+    }
+    
+    response = requests.post(url, files=files, data=data)
+    
+    if response.status_code == 200:
+        result = response.json()
+        batch_id = result['batch_id']
+        print(f"✅ 배치 제출 성공: {batch_id}")
+        return batch_id
+    else:
+        print(f"❌ 배치 제출 실패: {response.status_code}")
+        return None
+
+# 사용 예제
+batch_id = submit_batch_transcription()
+```
+
+#### 2. 배치 상태 모니터링
+```python
+import time
+
+def monitor_batch_progress(batch_id):
+    url = f"http://localhost:8004/batch/status/{batch_id}"
+    
+    while True:
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            status = response.json()
+            progress = status['progress'] * 100
+            
+            print(f"🔄 진행률: {progress:.1f}% "
+                  f"({status['processed_files']}/{status['total_files']}) "
+                  f"- 상태: {status['status']}")
+            
+            if status['status'] == 'completed':
+                print("✅ 배치 처리 완료!")
+                break
+            elif status['status'] == 'failed':
+                print(f"❌ 배치 처리 실패: {status.get('error_message', '')}")
+                break
+        
+        time.sleep(3)  # 3초마다 확인
+
+# 사용 예제
+monitor_batch_progress(batch_id)
+```
+
+#### 3. 결과 다운로드
+```python
+def download_batch_results(batch_id, save_path="batch_results"):
+    import os
+    import zipfile
+    
+    # 결과 다운로드
+    download_url = f"http://localhost:8004/batch/download/{batch_id}"
+    response = requests.get(download_url)
+    
+    if response.status_code == 200:
+        # ZIP 파일 저장
+        os.makedirs(save_path, exist_ok=True)
+        zip_path = os.path.join(save_path, f"results_{batch_id}.zip")
+        
+        with open(zip_path, 'wb') as f:
+            f.write(response.content)
+        
+        # 압축 해제
+        extract_path = os.path.join(save_path, f"extracted_{batch_id}")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_path)
+        
+        print(f"📥 결과 다운로드 완료: {zip_path}")
+        print(f"📂 압축 해제: {extract_path}")
+        
+        return zip_path, extract_path
+    else:
+        print(f"❌ 다운로드 실패: {response.status_code}")
+        return None, None
+
+# 사용 예제
+zip_path, extract_path = download_batch_results(batch_id)
+```
+
+#### 4. 배치 목록 조회
+```bash
+# 모든 배치 작업 목록
+curl http://localhost:8004/batch/list
+
+# 특정 배치 상태 조회
+curl http://localhost:8004/batch/status/{batch_id}
+
+# 특정 배치 결과 조회
+curl http://localhost:8004/batch/result/{batch_id}
+```
+
+### 📦 배치 결과 구조
+
+배치 처리 완료 후 다음과 같은 구조로 결과가 제공됩니다:
+
+```
+batch_results_{batch_id}.zip
+├── batch_results.json          # 전체 배치 결과 (JSON 형태)
+└── transcripts/                # 개별 텍스트 파일들
+    ├── audio1.txt             # 첫 번째 파일 전사 결과
+    ├── audio2.txt             # 두 번째 파일 전사 결과
+    └── audio3.txt             # 세 번째 파일 전사 결과
+```
+
+#### JSON 결과 예시:
+```json
+{
+  "batch_id": "f2462dbc-6dc2-4987-8fea-2ad58ecbd60f",
+  "total_files": 2,
+  "processed_files": 2,
+  "failed_files": 0,
+  "total_duration": 6.96,
+  "total_processing_time": 1.05,
+  "created_at": "2025-06-20T19:05:37.562582",
+  "completed_at": "2025-06-20T19:05:38.612845",
+  "files": [
+    {
+      "filename": "test_korean_sample1.wav",
+      "size_bytes": 176424,
+      "duration_seconds": 5.51,
+      "processing_time_seconds": 0.89,
+      "text": "김화영이 번역하고 책세상에서 출간된 카뮤의 전집",
+      "language": "ko",
+      "confidence": 0.950,
+      "segments": [...]
+    }
+  ]
+}
+```
+
+### 🛠️ 배치 처리 테스트
+
+포함된 테스트 클라이언트로 배치 처리를 바로 테스트할 수 있습니다:
+
+```bash
+# 배치 처리 테스트 실행
+python test_batch_processing.py
+```
+
+테스트에서는 다음을 확인할 수 있습니다:
+- 다중 파일 업로드
+- 실시간 진행률 모니터링
+- 자동 결과 다운로드 및 압축 해제
+- 결과 파일 구조 및 내용 확인
 
 async def test_advanced_correction():
     """고급 키워드 교정 테스트 (실제 검증된 결과)"""
@@ -558,7 +805,7 @@ import numpy as np
 
 # PCM 16kHz 오디오 생성 예제
 def generate_pcm_audio(duration=1.4, sample_rate=16000):
-    \"\"\"1.4초 테스트 오디오 생성\"\"\"
+    """1.4초 테스트 오디오 생성"""
     samples = int(duration * sample_rate)
     t = np.linspace(0, duration, samples, dtype=np.float32)
     
@@ -571,67 +818,67 @@ def generate_pcm_audio(duration=1.4, sample_rate=16000):
     return audio_int16.tobytes()
 
 async def test_confidence_transcription():
-    \"\"\"신뢰도 분석 전사 테스트\"\"\"
+    """신뢰도 분석 전사 테스트"""
     audio_bytes = generate_pcm_audio()
     audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
     
     async with aiohttp.ClientSession() as session:
         # 🎯 신뢰도 분석 전사 (권장)
         response = await session.post(
-            \"http://localhost:8004/infer/utterance\",
+            "http://localhost:8004/infer/utterance",
             json={
-                \"audio_data\": audio_b64,
-                \"language\": \"ko\",
-                \"audio_format\": \"pcm_16khz\",
-                \"enable_confidence\": True,
-                \"enable_timestamps\": True,
-                \"beam_size\": 5
+                "audio_data": audio_b64,
+                "language": "ko",
+                "audio_format": "pcm_16khz",
+                "enable_confidence": True,
+                "enable_timestamps": True,
+                "beam_size": 5
             }
         )
         result = await response.json()
         
-        print(f\"📊 전사 결과: {result['text']}\")
-        print(f\"⚡ RTF: {result['rtf']:.3f}x\")
-        print(f\"⏱️ 처리시간: {result['processing_time']:.3f}초\")
-        print(f\"🎵 오디오 길이: {result['audio_duration']:.2f}초\")
+        print(f"📊 전사 결과: {result['text']}")
+        print(f"⚡ RTF: {result['rtf']:.3f}x")
+        print(f"⏱️ 처리시간: {result['processing_time']:.3f}초")
+        print(f"🎵 오디오 길이: {result['audio_duration']:.2f}초")
         
         # 세그먼트별 신뢰도 분석
         if 'segments' in result:
             for segment in result['segments']:
-                print(f\"\\n📝 세그먼트 {segment['id']}:\")
-                print(f\"   텍스트: {segment['text']}\")
-                print(f\"   시간: {segment['start']:.2f}s ~ {segment['end']:.2f}s\")
-                print(f\"   신뢰도: {segment.get('confidence', 0):.3f}\")
+                print(f"\n📝 세그먼트 {segment['id']}:")
+                print(f"   텍스트: {segment['text']}")
+                print(f"   시간: {segment['start']:.2f}s ~ {segment['end']:.2f}s")
+                print(f"   신뢰도: {segment.get('confidence', 0):.3f}")
                 
                 # 단어별 신뢰도 (있는 경우)
                 if 'words' in segment:
                     for word in segment['words']:
-                        print(f\"     - '{word['word']}': {word.get('confidence', 0):.3f}\")
+                        print(f"     - '{word['word']}': {word.get('confidence', 0):.3f}")
 
 async def test_basic_transcription():
-    \"\"\"기본 전사 테스트 (호환성)\"\"\"
+    """기본 전사 테스트 (호환성)"""
     audio_bytes = generate_pcm_audio()
     audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
     
     async with aiohttp.ClientSession() as session:
         response = await session.post(
-            \"http://localhost:8004/transcribe\",
+            "http://localhost:8004/transcribe",
             json={
-                \"audio_data\": audio_b64,
-                \"language\": \"ko\",
-                \"audio_format\": \"pcm_16khz\"
+                "audio_data": audio_b64,
+                "language": "ko",
+                "audio_format": "pcm_16khz"
             }
         )
         result = await response.json()
-        print(f\"📝 기본 전사: {result['text']}\")
-        print(f\"⚡ RTF: {result['rtf']:.3f}x\")
+        print(f"📝 기본 전사: {result['text']}")
+        print(f"⚡ RTF: {result['rtf']:.3f}x")
 
 # 실행
-if __name__ == \"__main__\":
-    print(\"🎯 신뢰도 분석 전사 테스트:\")
+ if __name__ == "__main__":
+     print("🎯 신뢰도 분석 전사 테스트:")
     asyncio.run(test_confidence_transcription())
     
-    print(\"\\n📝 기본 전사 테스트:\")
+    print("\n📝 기본 전사 테스트:")
     asyncio.run(test_basic_transcription())
 ```
 
@@ -761,8 +1008,105 @@ source ./setup_cudnn_env.sh
 
 이 프로젝트는 MIT 라이선스 하에 있습니다.
 
+## 🔧 PM2 프로세스 관리
+
+### PM2 설치
+```bash
+# PM2 전역 설치
+npm install -g pm2
+```
+
+### 서버 관리 명령어
+
+#### 기본 관리
+```bash
+# 서버 시작
+./pm2_control.sh start
+
+# 서버 중지
+./pm2_control.sh stop
+
+# 서버 재시작
+./pm2_control.sh restart
+
+# 서버 상태 확인
+./pm2_control.sh status
+```
+
+#### 모니터링
+```bash
+# 실시간 로그 보기
+./pm2_control.sh logs
+
+# PM2 모니터링 대시보드
+./pm2_control.sh monitor
+
+# PM2에서 완전히 제거
+./pm2_control.sh delete
+```
+
+### PM2 설정 (`stt-decoder.config.js`)
+```javascript
+module.exports = {
+  apps : [{
+    name: "gpu-stt-server",
+    script: "./start_pm2.sh",
+    interpreter: "bash",
+    instances: 1,                    // GPU 서버는 단일 인스턴스
+    exec_mode: "fork",               // GPU 메모리 공유 방지
+    max_memory_restart: '8G',        // 8GB 메모리 제한
+    autorestart: true,               // 자동 재시작
+    min_uptime: "10s",               // 안정화 시간
+    max_restarts: 5,                 // 최대 재시작 횟수
+    restart_delay: 4000,             // 재시작 지연 (4초)
+    env: {
+      NODE_ENV: "production",
+      PORT: 8004,
+      PYTHONUNBUFFERED: "1"          // Python 출력 버퍼링 비활성화
+    }
+  }]
+};
+```
+
+### PM2 웹 모니터링 (선택사항)
+```bash
+# PM2 Plus 연결 (무료 모니터링)
+pm2 link <secret_key> <public_key>
+
+# 웹 모니터링 활성화
+pm2 web
+```
+
+### PM2 로그 관리
+```bash
+# 로그 파일 위치
+- ./logs/gpu-stt-out.log      # 표준 출력
+- ./logs/gpu-stt-error.log    # 에러 로그
+- ./logs/gpu-stt-combined.log # 통합 로그
+
+# 로그 정리
+pm2 flush                     # 모든 로그 삭제
+pm2 reloadLogs               # 로그 파일 갱신
+```
+
+### 환경 설정 자동화
+PM2 시작 시 자동으로 다음 설정이 적용됩니다:
+1. 🧹 기존 서버 프로세스 정리
+2. 🔧 Conda 환경 활성화 (`stt-decoder`)
+3. 🔧 cuDNN 환경 설정
+4. 🚀 GPU 최적화된 STT 서버 실행 (포트 8004)
+
+### 시스템 부팅 시 자동 시작
+```bash
+# PM2 스타트업 스크립트 생성
+pm2 startup
+
+# 현재 실행 중인 앱을 저장 (부팅 시 자동 시작)
+pm2 save
+```
+
 ---
 
 **제작**: AI STT 최적화 팀  
-**최종 업데이트**: 2024년 12월 26일  
-**버전**: 2.2.1 Advanced-Keyword-Intelligence (지능형 키워드 부스팅 완전 검증) 
+**최종 업데이트**: 2024년 12월 20일  
+**버전**: 2.2.2 PM2-Integration (PM2 프로세스 관리 통합) 

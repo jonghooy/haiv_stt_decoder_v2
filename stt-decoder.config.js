@@ -1,14 +1,27 @@
 module.exports = {
   apps : [{
-    name: "stt-server",
+    name: "gpu-stt-server",
     script: "./start_pm2.sh",
-    interpreter: "bash", // 이 스크립트를 실행할 인터프리터
-    log_date_format: "YYYY-MM-DD HH:mm Z", // 로그 시간 형식
-    out_file: "./logs/pm2-out.log",       // 표준 출력 로그 파일 경로
-    error_file: "./logs/pm2-error.log",   // 에러 로그 파일 경로
-    merge_logs: true,                     // 모든 로그를 하나의 파일로 병합
-    autorestart: true,                    // 앱이 비정상적으로 종료되면 자동 재시작
-    watch: false,                         // 파일 변경 감지 비활성화 (프로덕션에서는 false 권장)
-    max_memory_restart: '2G'              // 메모리 사용량이 2GB를 초과하면 재시작
+    interpreter: "bash",
+    instances: 1,                         // GPU 서버는 단일 인스턴스로 실행
+    exec_mode: "fork",                    // GPU 메모리 공유 문제로 fork 모드 사용
+    log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    out_file: "./logs/pm2-out.log",
+    error_file: "./logs/pm2-error.log",
+    merge_logs: true,
+    autorestart: true,
+    watch: false,
+    max_memory_restart: '8G',             // GPU 서버는 메모리 사용량이 많아 8GB로 설정
+    min_uptime: "10s",                    // 최소 10초 실행 후 안정화로 간주
+    max_restarts: 5,                      // 최대 재시작 횟수
+    restart_delay: 4000,                  // 재시작 지연 시간 (ms)
+    env: {
+      NODE_ENV: "production",
+      PORT: 8004,
+      PYTHONUNBUFFERED: "1"              // Python 출력 버퍼링 비활성화
+    },
+    error_file: "./logs/gpu-stt-error.log",
+    out_file: "./logs/gpu-stt-out.log",
+    log_file: "./logs/gpu-stt-combined.log"
   }]
 };
