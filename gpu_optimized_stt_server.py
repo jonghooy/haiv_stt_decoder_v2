@@ -95,10 +95,22 @@ async def warmup_large_model(stt_service):
         
         # 모델의 내부 transcribe 메서드를 직접 사용 (가장 안전함)
         start_time = time.time()
-        # STT 서비스의 내부 모델에 직접 접근 (Large-v3 최적화 파라미터)
+        # STT 서비스의 내부 모델에 안전하게 접근
+        model = None
+        
+        # 1. 직접 model 속성이 있는 경우 (NeMo 등)
         if hasattr(stt_service, 'model') and hasattr(stt_service.model, 'transcribe'):
+            model = stt_service.model
+        # 2. WhisperSTTServiceAdapter의 경우
+        elif hasattr(stt_service, 'whisper_service') and hasattr(stt_service.whisper_service, 'model'):
+            model = stt_service.whisper_service.model
+        # 3. 기타 어댑터 패턴
+        elif hasattr(stt_service, 'service') and hasattr(stt_service.service, 'model'):
+            model = stt_service.service.model
+        
+        if model and hasattr(model, 'transcribe'):
             # FasterWhisper 모델의 transcribe 메서드 직접 호출 (Large-v3 최적화)
-            segments, info = stt_service.model.transcribe(
+            segments, info = model.transcribe(
                 dummy_audio,
                 beam_size=5,  # Large-v3에 최적화된 beam_size
                 best_of=5,    # Large-v3에 최적화된 best_of
@@ -120,7 +132,11 @@ async def warmup_large_model(stt_service):
         # 웜업 실패는 서버 시작을 막지 않음
         pass
 
+# STT 서비스 관련 imports
 from src.api.stt_service import FasterWhisperSTTService
+from src.api.base_stt_service import BaseSTTService
+from src.api.stt_factory import STTServiceFactory
+
 from src.api.post_processing_correction import (
     get_post_processing_corrector,
     apply_keyword_correction,
@@ -135,12 +151,58 @@ from src.api.models import (
     ProcessingMetrics
 )
 
-# 로깅 설정
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# 로깅 설정 - 디버깅을 위해 DEBUG 레벨로 설정, 파일과 콘솔 동시 출력
+import logging.handlers
+
+# 로그 디렉토리 생성
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+
+# 로그 파일 경로
+log_file = log_dir / "stt_server_debug.log"
+
+# 로거 설정
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# 포맷터 설정
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# 파일 핸들러 (회전 로그 파일)
+file_handler = logging.handlers.RotatingFileHandler(
+    log_file, 
+    maxBytes=50*1024*1024,  # 50MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+
+# 콘솔 핸들러
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)  # 콘솔은 INFO 레벨만
+console_handler.setFormatter(formatter)
+
+# 핸들러 추가
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
+
+# 루트 로거도 설정
+logging.getLogger().setLevel(logging.DEBUG)
+logging.getLogger().addHandler(file_handler)
 
 # 극한 GPU 최적화 실행 (logger 정의 후)
 setup_extreme_gpu_optimizations()
+
+# ============================================================================
+# 모델 선택을 위한 전역 변수 및 설정
+# ============================================================================
+
+# 서버 설정을 위한 전역 변수들 (argparse로 설정됨)
+SERVER_MODEL_TYPE = "whisper"  # 기본값: whisper
+SERVER_MODEL_NAME = "large-v3"  # 기본값: large-v3
+SERVER_HOST = "0.0.0.0"
+SERVER_PORT = 8004
 
 # ============================================================================
 # 지능형 큐잉 시스템 구현
@@ -1181,19 +1243,109 @@ class BatchProcessor:
                     # PCM 16kHz로 가정
                     audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             
-            # STT 처리
+            # STT 처리 - 서비스 종류에 따라 다른 방식 사용
             start_time = time.time()
-            segments, info = stt_service.model.transcribe(
-                audio_np,
-                language=request.language,
-                word_timestamps=True,
-                beam_size=5,
-                best_of=5,
-                temperature=0.0
-            )
             
-            # 결과 수집
-            segments_list = list(segments)
+            # NeMo 서비스인지 확인
+            from src.api.nemo_stt_service import NeMoSTTService
+            if isinstance(stt_service, NeMoSTTService):
+                # NeMo 서비스 사용
+                logger.info("🤖 NeMo 서비스로 배치 전사 처리 중...")
+                logger.info(f"🔍 호출 파라미터 - audio_format: {request.audio_format}, language: {request.language}")
+                logger.info(f"🔍 audio_data 길이: {len(request.audio_data)} chars")
+                print(f"🚨 NeMo transcribe_audio 호출 직전! audio_format={request.audio_format}")
+                
+                try:
+                    result = await stt_service.transcribe_audio(
+                        request.audio_data,
+                        audio_format=request.audio_format,
+                        language=request.language
+                    )
+                    print("🚨 NeMo transcribe_audio 호출 성공!")
+                    logger.info("✅ NeMo transcribe_audio 호출 성공!")
+                except Exception as e:
+                    print(f"🚨 NeMo transcribe_audio 호출 실패: {e}")
+                    logger.error(f"❌ NeMo transcribe_audio 호출 실패: {e}")
+                    raise
+                
+                # NeMo 결과를 Whisper 형식으로 변환
+                full_text = result.text
+                processing_time = time.time() - start_time
+                audio_duration = len(audio_np) / 16000
+                
+                # 기본 세그먼트 생성 (NeMo는 segments를 따로 제공하지 않을 수 있음)
+                segments_list = [{
+                    "text": full_text,
+                    "start": 0.0,
+                    "end": audio_duration,
+                    "confidence": result.confidence if hasattr(result, 'confidence') else 0.8
+                }]
+                
+                # Whisper 스타일 info 객체 모방
+                class NeMoInfo:
+                    def __init__(self, language):
+                        self.language = language
+                
+                info = NeMoInfo(request.language)
+                
+            else:
+                # Whisper 서비스 사용
+                logger.info("🎤 Whisper 서비스로 배치 전사 처리 중...")
+                
+                # 안전한 모델 접근
+                model = None
+                if hasattr(stt_service, 'model') and hasattr(stt_service.model, 'transcribe'):
+                    model = stt_service.model
+                elif hasattr(stt_service, 'whisper_service') and hasattr(stt_service.whisper_service, 'model'):
+                    model = stt_service.whisper_service.model
+                elif hasattr(stt_service, 'service') and hasattr(stt_service.service, 'model'):
+                    model = stt_service.service.model
+                
+                if model and hasattr(model, 'transcribe'):
+                    segments, info = model.transcribe(
+                        audio_np,
+                        language=request.language,
+                        word_timestamps=True,
+                        beam_size=5,
+                        best_of=5,
+                        temperature=0.0
+                    )
+                    segments_list = list(segments)
+                else:
+                    # 모델 직접 접근이 불가능한 경우 서비스 메서드 사용
+                    logger.info("🔄 모델 직접 접근 불가, 서비스 메서드 사용")
+                    # STT 서비스의 transcribe 메서드 사용
+                    audio_bytes = (audio_np * 32768).astype(np.int16).tobytes()
+                    audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
+                    
+                    result = await stt_service.transcribe_audio(
+                        audio_data=audio_b64,
+                        audio_format="pcm_16khz",
+                        language=request.language
+                    )
+                    
+                    # 결과를 segments 형태로 변환
+                    segments_list = []
+                    if hasattr(result, 'segments') and result.segments:
+                        segments_list = result.segments
+                    else:
+                        # 단일 세그먼트로 처리
+                        class MockSegment:
+                            def __init__(self, text, start, end):
+                                self.text = text
+                                self.start = start
+                                self.end = end
+                                self.avg_logprob = -0.5
+                                self.words = []
+                        
+                        segments_list = [MockSegment(result.text, 0.0, len(audio_np) / 16000.0)]
+                    
+                    # info 객체 생성
+                    class MockInfo:
+                        def __init__(self, language):
+                            self.language = language
+                    
+                    info = MockInfo(request.language)
             
             # 신뢰도 계산 및 환각 필터 적용
             avg_confidence = 0.0
@@ -1202,32 +1354,46 @@ class BatchProcessor:
             total_hallucination_count = 0
             
             for i, segment in enumerate(segments_list):
-                # 단어 정보 수집
-                words = []
-                if hasattr(segment, 'words') and segment.words:
-                    for word in segment.words:
-                        # word.probability를 그대로 사용 (0-1 범위)
-                        word_confidence = word.probability if hasattr(word, 'probability') and word.probability else 0.0
-                        word_dict = {
-                            "word": word.word,
-                            "start": word.start,
-                            "end": word.end,
-                            "confidence": word_confidence
-                        }
-                        words.append(word_dict)
-                
-                # 개선된 신뢰도 계산: word-level 신뢰도를 우선 사용
-                segment_confidence = calculate_segment_confidence_from_words(
-                    words, 
-                    segment.avg_logprob if hasattr(segment, 'avg_logprob') else None
-                )
+                # 세그먼트가 딕셔너리인지 객체인지 확인
+                if isinstance(segment, dict):
+                    # NeMo 결과 (딕셔너리)
+                    segment_text = segment.get("text", "")
+                    segment_start = segment.get("start", 0.0)
+                    segment_end = segment.get("end", audio_duration)
+                    segment_confidence = segment.get("confidence", 0.8)
+                    words = segment.get("words", [])
+                else:
+                    # Whisper 결과 (객체)
+                    segment_text = segment.text
+                    segment_start = segment.start
+                    segment_end = segment.end
+                    
+                    # 단어 정보 수집
+                    words = []
+                    if hasattr(segment, 'words') and segment.words:
+                        for word in segment.words:
+                            # word.probability를 그대로 사용 (0-1 범위)
+                            word_confidence = word.probability if hasattr(word, 'probability') and word.probability else 0.0
+                            word_dict = {
+                                "word": word.word,
+                                "start": word.start,
+                                "end": word.end,
+                                "confidence": word_confidence
+                            }
+                            words.append(word_dict)
+                    
+                    # 개선된 신뢰도 계산: word-level 신뢰도를 우선 사용
+                    segment_confidence = calculate_segment_confidence_from_words(
+                        words, 
+                        segment.avg_logprob if hasattr(segment, 'avg_logprob') else None
+                    )
                 
                 # SegmentInfo를 딕셔너리로 생성 (JSON 직렬화 문제 방지)
                 segment_dict = {
                     "id": i,
-                    "text": segment.text,
-                    "start": segment.start,
-                    "end": segment.end,
+                    "text": segment_text,
+                    "start": segment_start,
+                    "end": segment_end,
                     "confidence": segment_confidence,
                     "words": words
                 }
@@ -1250,14 +1416,20 @@ class BatchProcessor:
                 if filtered_segment['text'].strip():
                     filtered_text_parts.append(filtered_segment['text'])
                 
-                avg_confidence += filtered_segment['confidence']
+                # confidence 값이 None이면 기본값 사용
+                segment_confidence_value = filtered_segment.get('confidence')
+                if segment_confidence_value is None:
+                    segment_confidence_value = 0.8  # 기본 신뢰도
+                
+                avg_confidence += segment_confidence_value
                 segment_infos.append(filtered_segment)
             
             if segments_list:
                 avg_confidence /= len(segments_list)
             
-            # 필터링된 전체 텍스트 생성
-            full_text = " ".join(filtered_text_parts)
+            # 필터링된 전체 텍스트 생성 (NeMo에서 이미 설정되지 않은 경우만)
+            if 'full_text' not in locals():
+                full_text = " ".join(filtered_text_parts)
             
             # 키워드 부스팅 후처리 시도 (배치 요청에서 활성화된 경우)
             if batch_request and batch_request.enable_keyword_boosting and post_processing_corrector:
@@ -1332,8 +1504,11 @@ class BatchProcessor:
             if total_hallucination_count > 0:
                 logger.info(f"🔍 총 {total_hallucination_count}개 환각 구간 감지 및 처리됨")
             
-            processing_time = time.time() - start_time
-            audio_duration = len(audio_np) / 16000
+            # 처리 시간과 오디오 길이 (NeMo에서 이미 설정되지 않은 경우만)
+            if 'processing_time' not in locals():
+                processing_time = time.time() - start_time
+            if 'audio_duration' not in locals():
+                audio_duration = len(audio_np) / 16000
             
             response_data = {
                 "text": full_text,
@@ -1402,8 +1577,8 @@ class BatchProcessor:
                 
                 timestamp_str = f"[{start_minutes:02d}:{start_seconds:06.3f} → {end_minutes:02d}:{end_seconds:06.3f}]"
                 
-                # 신뢰도 표시 (실제 값으로 표시, 0이면 표시하지 않음)
-                if confidence > 0:
+                # 신뢰도 표시 (실제 값으로 표시, None이거나 0이면 표시하지 않음)
+                if confidence is not None and confidence > 0:
                     confidence_str = f"(신뢰도: {confidence:.3f})"
                 else:
                     confidence_str = ""
@@ -1573,16 +1748,16 @@ class BatchProcessor:
         logger.info(f"정리된 배치 수: {len(to_remove)}")
 
 # 전역 서비스 인스턴스
-stt_service: Optional[FasterWhisperSTTService] = None
+stt_service: Optional[BaseSTTService] = None
 post_processing_corrector = None
 batch_processor: Optional[BatchProcessor] = None
 
 @app.on_event("startup")
 async def startup_event():
-    """서버 시작 시 STT 서비스, 후처리 교정 시스템, 큐잉 시스템 및 배치 프로세서 초기화"""
+    """서버 시작 시 선택된 모델로 STT 서비스 초기화"""
     global stt_service, post_processing_corrector, stt_queue, batch_processor
     try:
-        logger.info("🚀 Large-v3 전용 극한 최적화 STT Server 시작 중...")
+        logger.info(f"🚀 {SERVER_MODEL_TYPE.upper()} {SERVER_MODEL_NAME} 모델로 STT Server 시작 중...")
         logger.info(f"cuDNN 활성화 상태: {torch.backends.cudnn.enabled}")
         logger.info(f"cuDNN 벤치마크 모드: {torch.backends.cudnn.benchmark}")
         logger.info(f"TF32 활성화 상태: {torch.backends.cuda.matmul.allow_tf32}")
@@ -1596,28 +1771,35 @@ async def startup_event():
             logger.info(f"🎯 GPU 아키텍처: {gpu_props.major}.{gpu_props.minor}")
             logger.info(f"🎯 멀티프로세서 수: {gpu_props.multi_processor_count}")
         
-        # STT 서비스 생성 및 즉시 초기화 (Large-v3 전용 최적화)
-        logger.info("📦 Large-v3 모델 로딩 중 (float16 극한 최적화)...")
-        stt_service = FasterWhisperSTTService(
-            model_size="large-v3",
+        # 선택된 모델로 STT 서비스 생성
+        logger.info(f"📦 {SERVER_MODEL_TYPE.upper()} {SERVER_MODEL_NAME} 모델 로딩 중...")
+        stt_service = STTServiceFactory.create_service(
+            model_type=SERVER_MODEL_TYPE,
+            model_name=SERVER_MODEL_NAME,
             device="cuda",
             compute_type="float16"
         )
         
         # 모델을 미리 로드하여 첫 번째 요청 지연 제거
         start_time = time.time()
-        await stt_service.initialize()
+        success = await stt_service.initialize()
         load_time = time.time() - start_time
         
-        logger.info(f"✅ Large-v3 STT 서비스 초기화 완료 - 모델 로딩 시간: {load_time:.2f}초")
-        
-        # 모델 웜업 수행 (첫 요청 지연 최소화)
-        await warmup_large_model(stt_service)
+        if success:
+            logger.info(f"✅ {SERVER_MODEL_TYPE.upper()} STT 서비스 초기화 완료 - 모델 로딩 시간: {load_time:.2f}초")
+            
+            # Whisper 모델의 경우 웜업 수행
+            if SERVER_MODEL_TYPE == "whisper" and hasattr(stt_service, 'whisper_service'):
+                await warmup_large_model(stt_service.whisper_service)
+        else:
+            logger.error(f"❌ {SERVER_MODEL_TYPE.upper()} STT 서비스 초기화 실패")
+            raise RuntimeError(f"STT 서비스 초기화 실패: {stt_service.initialization_error}")
         
         # GPU 메모리 상태 출력
-        gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
-        gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3
-        logger.info(f"🎯 GPU 메모리 사용량 - 할당: {gpu_memory_allocated:.2f}GB, 예약: {gpu_memory_reserved:.2f}GB")
+        if torch.cuda.is_available():
+            gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3
+            gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3
+            logger.info(f"🎯 GPU 메모리 사용량 - 할당: {gpu_memory_allocated:.2f}GB, 예약: {gpu_memory_reserved:.2f}GB")
         
         # 후처리 키워드 교정 시스템 초기화
         logger.info("🔧 후처리 키워드 교정 시스템 초기화 중...")
@@ -1683,7 +1865,7 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    """루트 엔드포인트 - Large-v3 전용 극한 최적화 서버"""
+    """루트 엔드포인트 - 현재 로드된 모델 정보 포함"""
     gpu_features = {}
     if torch.cuda.is_available():
         gpu_props = torch.cuda.get_device_properties(0)
@@ -1694,18 +1876,22 @@ async def root():
         }
     
     return {
-        "message": "Large-v3 전용 극한 최적화 STT API Server", 
-        "model": "large-v3",
-        "optimization": "extreme",
+        "message": f"{SERVER_MODEL_TYPE.upper()} {SERVER_MODEL_NAME} STT API Server", 
+        "model_type": SERVER_MODEL_TYPE,
+        "model_name": SERVER_MODEL_NAME,
+        "optimization": "extreme" if SERVER_MODEL_TYPE == "whisper" else "optimized",
         "status": "running",
+        "supported_models": STTServiceFactory.get_supported_models(),
         "features": {
-            "model_type": "large-v3",
-            "compute_type": "float16", 
-            "memory_fraction": 0.95,
+            "model_type": SERVER_MODEL_TYPE,
+            "model_name": SERVER_MODEL_NAME,
+            "compute_type": "float16" if SERVER_MODEL_TYPE == "whisper" else "auto",
+            "memory_fraction": 0.95 if SERVER_MODEL_TYPE == "whisper" else 0.8,
             "cudnn_enabled": torch.backends.cudnn.enabled,
             "cudnn_benchmark": torch.backends.cudnn.benchmark,
             "tf32_enabled": torch.backends.cuda.matmul.allow_tf32,
             "gpu_available": torch.cuda.is_available(),
+            "nemo_available": STTServiceFactory.is_nemo_available(),
             **gpu_features
         }
     }
@@ -1753,6 +1939,24 @@ async def health_check():
         gpu_info=gpu_info,
         optimization_status=optimization_status
     )
+
+@app.get("/models/info")
+async def get_model_info():
+    """현재 로드된 모델의 상세 정보"""
+    if stt_service is None:
+        raise HTTPException(status_code=500, detail="STT 서비스가 초기화되지 않았습니다")
+    
+    return {
+        "current_model": stt_service.get_model_info(),
+        "supported_models": STTServiceFactory.get_supported_models(),
+        "server_config": {
+            "model_type": SERVER_MODEL_TYPE,
+            "model_name": SERVER_MODEL_NAME,
+            "nemo_available": STTServiceFactory.is_nemo_available(),
+            "available_model_types": STTServiceFactory.get_available_model_types()
+        },
+        "stats": stt_service.get_stats()
+    }
 
 @app.post("/infer/utterance", response_model=TranscriptionResponse) 
 async def transcribe_utterance(request: TranscriptionRequest):
@@ -1836,17 +2040,29 @@ async def transcribe_utterance(request: TranscriptionRequest):
                             audio_bytes = base64.b64decode(request.audio_data)
                             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                             
-                            # FasterWhisper 모델에 직접 접근하여 initial_prompt 사용
-                            segments, info = stt_service.model.transcribe(
-                                audio_array,
-                                beam_size=5,
-                                best_of=5,
-                                temperature=0.0,
-                                vad_filter=False,
-                                language=request.language,
-                                word_timestamps=True,
-                                initial_prompt=initial_prompt  # 키워드 힌트 제공
-                            )
+                            # 안전한 모델 접근으로 initial_prompt 사용
+                            model = None
+                            if hasattr(stt_service, 'model') and hasattr(stt_service.model, 'transcribe'):
+                                model = stt_service.model
+                            elif hasattr(stt_service, 'whisper_service') and hasattr(stt_service.whisper_service, 'model'):
+                                model = stt_service.whisper_service.model
+                            elif hasattr(stt_service, 'service') and hasattr(stt_service.service, 'model'):
+                                model = stt_service.service.model
+                            
+                            if model and hasattr(model, 'transcribe'):
+                                segments, info = model.transcribe(
+                                    audio_array,
+                                    beam_size=5,
+                                    best_of=5,
+                                    temperature=0.0,
+                                    vad_filter=False,
+                                    language=request.language,
+                                    word_timestamps=True,
+                                    initial_prompt=initial_prompt  # 키워드 힌트 제공
+                                )
+                            else:
+                                # 모델 직접 접근이 불가능한 경우
+                                raise Exception("키워드 부스팅을 위한 모델 직접 접근이 불가능합니다")
                             
                             segments_list = list(segments)
                             if segments_list:
@@ -2987,16 +3203,72 @@ class GPUOptimizedSTTServer:
         self.hallucination_filter = HallucinationFilter()  # 환각 필터 추가
 
 if __name__ == "__main__":
-    import uvicorn
     import argparse
     
-    parser = argparse.ArgumentParser(description="GPU Optimized STT Server")
+    parser = argparse.ArgumentParser(description="GPU Optimized STT Server with Model Selection")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+    parser.add_argument("--port", type=int, default=8004, help="Port to bind to")
     parser.add_argument("--workers", type=int, default=1, help="Number of workers")
+    
+    # 모델 선택 옵션
+    parser.add_argument("--model", 
+                       choices=STTServiceFactory.get_available_model_types(),
+                       default="whisper",
+                       help="STT 모델 타입 선택 (whisper 또는 nemo)")
+    parser.add_argument("--list-models", 
+                       action="store_true",
+                       help="지원되는 모델 목록 출력")
     
     args = parser.parse_args()
     
-    uvicorn.run(app, host=args.host, port=args.port, workers=args.workers)
+    # 지원 모델 목록 출력
+    if args.list_models:
+        print("🤖 지원되는 STT 모델:")
+        supported_models = STTServiceFactory.get_supported_models()
+        for model_type, info in supported_models.items():
+            if info.get("available", True):
+                print(f"\n📦 {model_type.upper()} ({info['description']}):")
+                for model in info['models']:
+                    marker = " (기본)" if model == info['default'] else ""
+                    print(f"  - {model}{marker}")
+            else:
+                print(f"\n❌ {model_type.upper()} - 사용 불가능")
+        
+        if not STTServiceFactory.is_nemo_available():
+            print(f"\n⚠️  NeMo 모델을 사용하려면 다음 명령을 실행하세요:")
+            print(f"   pip install nemo-toolkit[asr] omegaconf hydra-core")
+        
+        sys.exit(0)
+    
+    # 모델 설정
+    SERVER_MODEL_TYPE = args.model
+    SERVER_MODEL_NAME = STTServiceFactory.get_default_model(SERVER_MODEL_TYPE)
+    
+    # 모델 유효성 검증
+    if not STTServiceFactory.validate_model(SERVER_MODEL_TYPE, SERVER_MODEL_NAME):
+        print(f"❌ 모델 설정 오류:")
+        if SERVER_MODEL_TYPE == "nemo" and not STTServiceFactory.is_nemo_available():
+            print("NeMo 패키지가 설치되지 않았습니다.")
+            print("다음 명령을 실행하여 설치하세요:")
+            print("pip install nemo-toolkit[asr] omegaconf hydra-core")
+        else:
+            print(f"모델 타입 '{SERVER_MODEL_TYPE}'이 지원되지 않습니다.")
+        sys.exit(1)
+    
+    # 서버 설정
+    SERVER_HOST = args.host
+    SERVER_PORT = args.port
+    
+    print(f"🚀 STT 서버 시작:")
+    print(f"   모델: {SERVER_MODEL_TYPE} ({SERVER_MODEL_NAME})")
+    print(f"   주소: {SERVER_HOST}:{SERVER_PORT}")
+    print(f"   워커 수: {args.workers}")
+    
+    # NeMo 경고 메시지
+    if SERVER_MODEL_TYPE == "nemo" and not STTServiceFactory.is_nemo_available():
+        print("❌ NeMo 패키지가 설치되지 않았습니다.")
+        print("서버 시작에 실패할 수 있습니다.")
+    
+    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT, workers=args.workers)
 
 

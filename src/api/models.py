@@ -141,6 +141,23 @@ class TranscriptionSegment(BaseModel):
     )
 
 
+class STTResult(BaseModel):
+    """STT service result model"""
+    
+    text: str = Field(..., description="Transcribed text")
+    language: str = Field(..., description="Detected or specified language")
+    rtf: float = Field(..., description="Real-time factor")
+    audio_duration: float = Field(..., description="Audio duration in seconds")
+    segments: Optional[List[dict]] = Field(
+        default=None,
+        description="Transcription segments"
+    )
+    confidence: Optional[float] = Field(
+        default=None,
+        description="Overall confidence score"
+    )
+
+
 class ProcessingMetrics(BaseModel):
     """Processing performance metrics"""
     

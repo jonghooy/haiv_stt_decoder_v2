@@ -4,13 +4,15 @@ RTX 4090 Large-v3 극한 최적화 음성 인식 시스템 (신뢰도 분석 포
 
 ## 🚀 주요 특징
 
-- **Large-v3 극한 최적화**: GPU 메모리 95% 활용, TF32/Flash Attention 적용
+- **🤖 다중 모델 지원**: Whisper와 NeMo STT 모델을 서버 기동 시 선택 가능
+- **Whisper 극한 최적화**: GPU 메모리 95% 활용, TF32/Flash Attention 적용
+- **🆕 NeMo STT 지원**: 한국어 특화 `eesungkim/korean-stt-model` 등 NVIDIA NeMo 모델
 - **신뢰도 분석**: 세그먼트별/단어별 신뢰도 점수 제공 (0.0~1.0)
 - **🧠 지능형 키워드 부스팅**: NLP 기반 다층 교정 파이프라인 (0.8ms 초고속, 100% 정확도)
 - **실시간 처리**: RTF 0.027x ~ 0.078x (VAD 설정에 따라)
 - **세그먼트 정보**: 시간 구간별 상세 전사 결과 및 타임스탬프
 - **VAD 지원**: 클라이언트별 음성 활동 감지 On/Off 설정
-- **한국어 특화**: Faster Whisper Large-v3 모델 (float16 최적화)
+- **다양한 모델**: Faster Whisper (tiny~large-v3) + NeMo ASR 모델군
 - **RTX 4090 최적화**: Tensor Core, Mixed Precision, cuDNN 벤치마크 활용
 
 ## 📊 성능 지표
@@ -77,14 +79,40 @@ source ./setup_cudnn_env.sh
 
 ### 2. 서버 실행
 
+#### 지원 모델 목록 확인
 ```bash
-# 메인 서버 실행 (Large-v3 극한 최적화 + 신뢰도 분석)
+# 사용 가능한 모델 타입과 이름 목록 출력
+python gpu_optimized_stt_server.py --list-models
+```
+
+#### Whisper 모델 실행 (기본)
+```bash
+# 기본 Whisper large-v3 모델 (극한 최적화)
 python gpu_optimized_stt_server.py
 
-# 단순 서버 실행 (Large-v3 전용)
-python large_only_optimized_server.py
+# Whisper 모델로 명시적 실행
+python gpu_optimized_stt_server.py --model whisper
 
-# 포트: 8004 (기본값)
+# 포트 지정
+python gpu_optimized_stt_server.py --model whisper --port 8005
+```
+
+#### NeMo STT 모델 실행 ⭐ (NEW!)
+```bash
+# 한국어 NeMo 모델 (eesungkim/korean-stt-model)
+python gpu_optimized_stt_server.py --model nemo
+
+# 포트 지정
+python gpu_optimized_stt_server.py --model nemo --port 8005
+
+# NeMo 패키지 설치 (필요한 경우)
+pip install nemo-toolkit[asr] omegaconf hydra-core
+```
+
+#### 단순 서버 (레거시)
+```bash
+# Large-v3 전용 단순 서버
+python large_only_optimized_server.py
 ```
 
 ### 3. API 테스트
@@ -118,7 +146,11 @@ curl -X POST http://localhost:8004/infer/utterance \
 
 ### 1. 헬스 체크
 - **GET** `/health`
-- GPU 상태, 모델 로딩 상태, Large-v3 최적화 정보 확인
+- GPU 상태, 모델 로딩 상태, 최적화 정보 확인
+
+### 1-1. 모델 정보 ⭐ (NEW!)
+- **GET** `/models/info`
+- 현재 로드된 모델 상세 정보, 지원 모델 목록, 서버 통계
 
 ### 2. 🎯 신뢰도 분석 전사 (권장)
 - **POST** `/infer/utterance`
